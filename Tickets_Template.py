@@ -46,7 +46,7 @@ import pyodbc
 #Sync function for retreiving exports/imports from Eloqua
 def sync(uri, response, base_url):
     if response.json()['status'] == 'pending':
-        syncrequest = requests.get(base_url+uri, headers=headers)
+        syncrequest = requests.get(base_url + '/api/bulk/2.0' + uri, headers=headers)
         if syncrequest.json()['status'] == 'success':
             return True
         elif syncrequest.json()['status'] == 'pending':
@@ -56,7 +56,7 @@ def sync(uri, response, base_url):
             print('Sync Churning')
             sync(uri, response, base_url)
         elif syncrequest.json()['status'] == 'warning' or 'error':
-            print((requests.get(base_url+uri+'/logs', headers=headers)).json())
+            print((requests.get(base_url + '/api/bulk/2.0' + uri + '/logs', headers=headers)).json())
         else:
             print(syncrequest.json())
             print('Sync Failed')
@@ -103,9 +103,6 @@ def getBucketInfo():
     bucket_name = ''
     prefix = ''
 
-    # Assign client name 
-    clietName = ''
-
     bucketInfo = {}
     bucketInfo['accessKey'] = AWS_ACCESS_KEY_ID
     bucketInfo['secretAccessKey'] = AWS_SECRET_ACCESS_KEY
@@ -118,53 +115,83 @@ def getBucketInfo():
 
 def getTicketIntegrationSummary():                
 
-        print('Retrieving Tickets CDO Data Created Today...')
+    apiAccess = getEloquaAccess()
+    sitename = apiAccess['site']
+    headers = apiAccess['headers']
+    baseUrl = apiAccess['baseUrl']
 
-        cdoData = json.dumps({
-            "name" : "Retrieve SYSTEM - KORE Tickets CDO Data Created Today",
-            "fields" : {
-                "pk" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
-                "emailAddress" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
-                "createDate" : "{{CustomObject[<customDataObjectId>].CreatedAt}}",
-                "updateDate" : "{{CustomObject[<customDataObjectId>].UpdatedAt}}"
-            },
-            "filter" : "'{{CustomObject[<customDataObjectId>].CreatedAt}}' >= '" + todayDate + "'"
-        })
+    print('Retrieving Tickets CDO Data Created Today...')
 
-        cdoUrl = bulkUrl + '/customObjects/<customDataObjectId>/exports'
-        cdoReqExport = requests.post(cdoUrl, headers=headers, data=cdoData)
+    cdoData = json.dumps({
+        "name" : "Retrieve SYSTEM - KORE Tickets CDO Data Created Today",
+        "fields" : {
+            "pk" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
+            "emailAddress" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
+            "createDate" : "{{CustomObject[<customDataObjectId>].CreatedAt}}",
+            "updateDate" : "{{CustomObject[<customDataObjectId>].UpdatedAt}}"
+        },
+        "filter" : "'{{CustomObject[<customDataObjectId>].CreatedAt}}' >= '" + todayDate + "'"
+    })
 
-        cdoExportUri = cdoReqExport.json()["uri"]
+    cdoUrl = baseUrl + '/api/bulk/2.0/customObjects/<customDataObjectId>/exports'
+    cdoReqExport = requests.post(cdoUrl, headers=headers, data=cdoData)
 
-        # Setup sync instance 
-        cdoReqExportSyncData = json.dumps({
-            "syncedInstanceUri" : cdoExportUri}
-        )
+    cdoExportUri = cdoReqExport.json()["uri"]
 
-        # Sync the data retrieval
-        cdoReqSync = requests.post(bulkUrl + '/syncs', headers=headers, data=cdoReqExportSyncData)
+    # Setup sync instance 
+    cdoReqExportSyncData = json.dumps({
+        "syncedInstanceUri" : cdoExportUri}
+    )
 
-        if cdoReqSync.status_code == 201:
-            cdoSyncUri = cdoReqSync.json()['uri']
-            sync(cdoSyncUri, cdoReqSync, bulkUrl)
-        else: 
-            print('cdoReqSync status code failed to process...')
-            #quit()
+    # Sync the data retrieval
+    cdoReqSync = requests.post(baseUrl + '/api/bulk/2.0/syncs', headers=headers, data=cdoReqExportSyncData)
 
-        # Get the Sync Instance URI
-        cdoReqSyncInstanceUri = cdoReqSync.json()['syncedInstanceUri']
+    if cdoReqSync.status_code == 201:
+        cdoSyncUri = cdoReqSync.json()['uri']
+        sync(cdoSyncUri, cdoReqSync, bulkUrl)
+    else: 
+        print('cdoReqSync status code failed to process...')
+        #quit()
 
-        # Uxing the Sync Istance URI, retrieve the data from Eloqua API
-        # Keep trying to retrieve the data until successful
-        cdoCount = 0
-        cdoHasMore = 'False'
+    # Get the Sync Instance URI
+    cdoReqSyncInstanceUri = cdoReqSync.json()['syncedInstanceUri']
 
-        cdoReqData = requests.get(bulkUrl + cdoReqSyncInstanceUri + '/data', params='limit=50000', headers=headers)
-        #parsedResponse = r.json()
+    # Uxing the Sync Istance URI, retrieve the data from Eloqua API
+    # Keep trying to retrieve the data until successful
+    cdoCount = 0
+    cdoHasMore = 'False'
+
+    cdoReqData = requests.get(baseUrl + '/api/bulk/2.0' + cdoReqSyncInstanceUri + '/data', params='limit=50000', headers=headers)
+    #parsedResponse = r.json()
+    cdoReqDataCount = int(cdoReqData.json()['count'])
+
+    print('Retrieving first 50000 CDO records...')
+    ticketDataCreated = []
+
+    if cdoReqDataCount > 0:
+        cdoReqDataItems = cdoReqData.json()['items']
+    else:
+        cdoReqDataItems = []
+
+    for element in cdoReqDataItems:
+        elem = {}
+        elem['pk'] = element['pk']
+        elem['emailAddress'] = element['emailAddress'].lower()
+        elem['createDate'] = element['createDate']
+        elem['updateDate'] = element['updateDate']
+        ticketDataCreated.append(elem)
+
+    cdoHasMore = cdoReqData.json()["hasMore"]
+    cdoOffsetNum = 0
+    #orig_url = url
+
+    while cdoHasMore is True:
+        cdoOffsetNum = cdoOffsetNum + 50000
+        print('Retrieving next {} CDO records...'.format(cdoOffsetNum))
+        cdoReqUrl = bulkUrl + cdoReqSyncInstanceUri + '/data' + '?offset=%d' % cdoOffsetNum
+
+        cdoReqData = requests.get(cdoReqUrl, params='limit=50000', headers=headers)
         cdoReqDataCount = int(cdoReqData.json()['count'])
-
-        print('Retrieving first 50000 CDO records...')
-        ticketDataCreated = []
 
         if cdoReqDataCount > 0:
             cdoReqDataItems = cdoReqData.json()['items']
@@ -178,82 +205,81 @@ def getTicketIntegrationSummary():
             elem['createDate'] = element['createDate']
             elem['updateDate'] = element['updateDate']
             ticketDataCreated.append(elem)
-
+        
         cdoHasMore = cdoReqData.json()["hasMore"]
-        cdoOffsetNum = 0
-        #orig_url = url
+      
+    print('Number of Ticket Data Created : {}'.format(len(ticketDataCreated)))
 
-        while cdoHasMore is True:
-            cdoOffsetNum = cdoOffsetNum + 50000
-            print('Retrieving next {} CDO records...'.format(cdoOffsetNum))
-            cdoReqUrl = bulkUrl + cdoReqSyncInstanceUri + '/data' + '?offset=%d' % cdoOffsetNum
+    print('Retrieving Tickets CDO Data Updated Today...')
 
-            cdoReqData = requests.get(cdoReqUrl, params='limit=50000', headers=headers)
-            cdoReqDataCount = int(cdoReqData.json()['count'])
+    cdoData = json.dumps({
+        "name" : "Retrieve SYSTEM - KORE Tickets CDO Data Updated Today",
+        "fields" : {
+            "pk" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
+            "emailAddress" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
+            "createDate" : "{{CustomObject[<customDataObjectId>].CreatedAt}}",
+            "updateDate" : "{{CustomObject[<customDataObjectId>].UpdatedAt}}"
+        },
+        "filter" : "'{{CustomObject[<customDataObjectId>].UpdatedAt}}' >= '" + todayDate + "' AND '{{CustomObject[<customDataObjectId>].CreatedAt}}' < '" + todayDate + "'"
+    })
 
-            if cdoReqDataCount > 0:
-                cdoReqDataItems = cdoReqData.json()['items']
-            else:
-                cdoReqDataItems = []
+    cdoUrl = baseUrl + '/api/bulk/2.0/customObjects/<customDataObjectId>/exports'
+    cdoReqExport = requests.post(cdoUrl, headers=headers, data=cdoData)
 
-            for element in cdoReqDataItems:
-                elem = {}
-                elem['pk'] = element['pk']
-                elem['emailAddress'] = element['emailAddress'].lower()
-                elem['createDate'] = element['createDate']
-                elem['updateDate'] = element['updateDate']
-                ticketDataCreated.append(elem)
-            
-            cdoHasMore = cdoReqData.json()["hasMore"]
-          
-        print('Number of Ticket Data Created : {}'.format(len(ticketDataCreated)))
+    cdoExportUri = cdoReqExport.json()["uri"]
 
-        print('Retrieving Tickets CDO Data Updated Today...')
+    # Setup sync instance 
+    cdoReqExportSyncData = json.dumps({
+        "syncedInstanceUri" : cdoExportUri}
+    )
 
-        cdoData = json.dumps({
-            "name" : "Retrieve SYSTEM - KORE Tickets CDO Data Updated Today",
-            "fields" : {
-                "pk" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
-                "emailAddress" : "{{CustomObject[<customDataObjectId>].Field[<fieldId>]}}",
-                "createDate" : "{{CustomObject[<customDataObjectId>].CreatedAt}}",
-                "updateDate" : "{{CustomObject[<customDataObjectId>].UpdatedAt}}"
-            },
-            "filter" : "'{{CustomObject[<customDataObjectId>].UpdatedAt}}' >= '" + todayDate + "' AND '{{CustomObject[<customDataObjectId>].CreatedAt}}' < '" + todayDate + "'"
-        })
+    # Sync the data retrieval
+    cdoReqSync = requests.post(baseUrl + '/api/bulk/2.0/syncs', headers=headers, data=cdoReqExportSyncData)
 
-        cdoUrl = bulkUrl + '/customObjects/<customDataObjectId>/exports'
-        cdoReqExport = requests.post(cdoUrl, headers=headers, data=cdoData)
+    if cdoReqSync.status_code == 201:
+        cdoSyncUri = cdoReqSync.json()['uri']
+        sync(cdoSyncUri, cdoReqSync, bulkUrl)
+    else: 
+        print 'cdoReqSync status code failed to process...'
+        #quit()
 
-        cdoExportUri = cdoReqExport.json()["uri"]
+    # Get the Sync Instance URI
+    cdoReqSyncInstanceUri = cdoReqSync.json()["syncedInstanceUri"]
 
-        # Setup sync instance 
-        cdoReqExportSyncData = json.dumps({
-            "syncedInstanceUri" : cdoExportUri}
-        )
+    # Uxing the Sync Istance URI, retrieve the data from Eloqua API
+    # Keep trying to retrieve the data until successful
+    cdoCount = 0
+    cdoHasMore = "False"
 
-        # Sync the data retrieval
-        cdoReqSync = requests.post(bulkUrl + '/syncs', headers=headers, data=cdoReqExportSyncData)
+    cdoReqData = requests.get(baseUrl + '/api/bulk/2.0' + cdoReqSyncInstanceUri + '/data', params='limit=50000', headers=headers)
+    cdoReqDataCount = int(cdoReqData.json()['count'])
 
-        if cdoReqSync.status_code == 201:
-            cdoSyncUri = cdoReqSync.json()['uri']
-            sync(cdoSyncUri, cdoReqSync, bulkUrl)
-        else: 
-            print 'cdoReqSync status code failed to process...'
-            #quit()
+    print('Retrieving first 50000 CDO records...')
+    ticketDataUpdated = []
 
-        # Get the Sync Instance URI
-        cdoReqSyncInstanceUri = cdoReqSync.json()["syncedInstanceUri"]
+    if cdoReqDataCount > 0:
+        cdoReqDataItems = cdoReqData.json()['items']
+    else:
+        cdoReqDataItems = []
 
-        # Uxing the Sync Istance URI, retrieve the data from Eloqua API
-        # Keep trying to retrieve the data until successful
-        cdoCount = 0
-        cdoHasMore = "False"
+    for element in cdoReqDataItems:
+        elem = {}
+        elem['pk'] = element['pk']
+        elem['emailAddress'] = element['emailAddress'].lower()
+        elem['createDate'] = element['createDate']
+        elem['updateDate'] = element['updateDate']
+        ticketDataUpdated.append(elem)
 
-        cdoReqData = requests.get(bulkUrl + cdoReqSyncInstanceUri + '/data', params='limit=50000', headers=headers)
+    cdoHasMore = cdoReqData.json()["hasMore"]
+    cdoOffsetNum = 0
+
+    while cdoHasMore is True:
+        cdoOffsetNum = cdoOffsetNum + 50000
+        print('Retrieving next {} CDO records...'.format(cdoOffsetNum))
+        cdoReqUrl = bulkUrl + cdoReqSyncInstanceUri + '/data' + '?offset=%d' % cdoOffsetNum
+
+        cdoReqData = requests.get(cdoReqUrl, params='limit=50000', headers=headers)
         cdoReqDataCount = int(cdoReqData.json()['count'])
-
-        print('Retrieving first 50000 CDO records...')
-        ticketDataUpdated = []
 
         if cdoReqDataCount > 0:
             cdoReqDataItems = cdoReqData.json()['items']
@@ -267,40 +293,16 @@ def getTicketIntegrationSummary():
             elem['createDate'] = element['createDate']
             elem['updateDate'] = element['updateDate']
             ticketDataUpdated.append(elem)
-
+        
         cdoHasMore = cdoReqData.json()["hasMore"]
-        cdoOffsetNum = 0
+      
+    print('Number of Ticket Data Updated : {}'.format(len(ticketDataUpdated)))
 
-        while cdoHasMore is True:
-            cdoOffsetNum = cdoOffsetNum + 50000
-            print('Retrieving next {} CDO records...'.format(cdoOffsetNum))
-            cdoReqUrl = bulkUrl + cdoReqSyncInstanceUri + '/data' + '?offset=%d' % cdoOffsetNum
+    ticketIntegrationSummary = {}
+    ticketIntegrationSummary['dataCreated'] = len(ticketDataCreated)
+    ticketIntegrationSummary['dataUpdated'] = len(ticketDataUpdated)
 
-            cdoReqData = requests.get(cdoReqUrl, params='limit=50000', headers=headers)
-            cdoReqDataCount = int(cdoReqData.json()['count'])
-
-            if cdoReqDataCount > 0:
-                cdoReqDataItems = cdoReqData.json()['items']
-            else:
-                cdoReqDataItems = []
-
-            for element in cdoReqDataItems:
-                elem = {}
-                elem['pk'] = element['pk']
-                elem['emailAddress'] = element['emailAddress'].lower()
-                elem['createDate'] = element['createDate']
-                elem['updateDate'] = element['updateDate']
-                ticketDataUpdated.append(elem)
-            
-            cdoHasMore = cdoReqData.json()["hasMore"]
-          
-        print('Number of Ticket Data Updated : {}'.format(len(ticketDataUpdated)))
-
-        ticketIntegrationSummary = {}
-        ticketIntegrationSummary['dataCreated'] = len(ticketDataCreated)
-        ticketIntegrationSummary['dataUpdated'] = len(ticketDataUpdated)
-
-        return ticketIntegrationSummary
+    return ticketIntegrationSummary
 
 
 
